@@ -72,7 +72,15 @@ trait ListTermsTrait
 
         // Filter by specific resource IDs if provided.
         if (!empty($options['resource_ids'])) {
-            $qb->andWhere($expr->in('value.resource_id', ':resource_ids'));
+            $subQueryBuilder_media = $connection->createQueryBuilder();
+            $subexpr_m = $subQueryBuilder_media -> expr();
+            $subQueryBuilder_media -> select('media.id') -> from('media', 'media') ->where($subexpr_m->in('media.item_id', ':resource_ids'));
+
+            $qb->andWhere($expr->orX(
+                $expr->in('value.resource_id', '(' . $subQueryBuilder_media->getSQL() . ')'),
+                $expr->in('value.resource_id', ':resource_ids')
+            ));
+
             $bind['resource_ids'] = array_values(array_map('intval', $options['resource_ids']));
             $types['resource_ids'] = \Doctrine\DBAL\Connection::PARAM_INT_ARRAY;
         }
