@@ -173,6 +173,13 @@ abstract class AbstractSpreadsheetFormatter extends AbstractFieldsFormatter
                 $shaperParams = $this->shaperSettings($shaper);
                 $values = $this->stringMetadata($resource, $sourceField, $shaperParams);
                 $values = $this->shapeValues($values, $shaperParams);
+                if (!$values){
+                    foreach ($resource->media() as $resource_media){
+                        $values = $this->stringMetadata($resource_media, $sourceField, $shaperParams);
+                        $values = $this->shapeValues($values, $shaperParams);
+                        if($values) break;
+                    }
+                }
                 $allValues = array_merge($allValues, $values);
             }
 
