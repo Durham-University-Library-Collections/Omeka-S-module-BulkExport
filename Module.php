@@ -2,10 +2,33 @@
 
 namespace BulkExport;
 
-if (!class_exists('Common\TraitModule', false)) {
-    require_once file_exists(dirname(__DIR__) . '/Common/src/TraitModule.php')
-        ? dirname(__DIR__) . '/Common/src/TraitModule.php'
-        : dirname(__DIR__) . '/Common/TraitModule.php';
+// Load the module dependencies when installed as a zip.
+// With composer, libraries are stored in omeka vendor/ and the module has none.
+if (file_exists(__DIR__ . '/vendor/autoload.php')) {
+    require_once __DIR__ . '/vendor/autoload.php';
+}
+
+// Common may be installed but not registered in autoloader, in particular
+// during upgrade. So dynamically register all classes of the module.
+if (!defined('COMMON_PSR4_FALLBACK')) {
+    foreach ([
+        OMEKA_PATH . '/modules/Common/src',
+        OMEKA_PATH . '/composer-addons/modules/Common/src',
+        dirname(__DIR__) . '/Common/src',
+    ] as $commonSrc) {
+        if (file_exists($commonSrc . '/TraitModule.php')) {
+            define('COMMON_PSR4_FALLBACK', $commonSrc);
+            spl_autoload_register(static function ($class): void {
+                if (str_starts_with($class, 'Common\\')) {
+                    $file = COMMON_PSR4_FALLBACK . '/' . strtr(substr($class, 7), '\\', '/') . '.php';
+                    if (file_exists($file)) {
+                        require_once $file;
+                    }
+                }
+            });
+            break;
+        }
+    }
 }
 
 use Common\Stdlib\PsrMessage;
@@ -33,21 +56,15 @@ class Module extends AbstractModule
         'Log',
     ];
 
-    public function init(ModuleManager $moduleManager): void
-    {
-        require_once __DIR__ . '/vendor/autoload.php';
-    }
-
     protected function preInstall(): void
     {
         $services = $this->getServiceLocator();
-        $translate = $services->get('ControllerPluginManager')->get('translate');
         $translator = $services->get('MvcTranslator');
 
-        if (!method_exists($this, 'checkModuleActiveVersion') || !$this->checkModuleActiveVersion('Common', '3.4.81')) {
+        if (!method_exists($this, 'checkModuleActiveVersion') || !$this->checkModuleActiveVersion('Common', '3.4.93')) {
             $message = new \Omeka\Stdlib\Message(
-                $translate('The module %1$s should be upgraded to version %2$s or later.'), // @translate
-                'Common', '3.4.81'
+                $translator->translate('The module %1$s should be upgraded to version %2$s or later.'), // @translate
+                'Common', '3.4.93'
             );
             throw new \Omeka\Module\Exception\ModuleCannotInstallException((string) $message);
         }
@@ -61,17 +78,17 @@ class Module extends AbstractModule
             ))->setTranslator($translator);
         }
 
-        if (!$this->checkModuleActiveVersion('Log', '3.4.36')) {
+        if (!$this->checkModuleActiveVersion('Log', '3.4.40')) {
             $errors[] = (string) (new PsrMessage(
                 'The module {module} should be upgraded to version {version} or later.', // @translate
-                ['module' => 'Log', 'version' => '3.4.36']
+                ['module' => 'Log', 'version' => '3.4.40']
             ))->setTranslator($translator);
         }
 
         $config = $services->get('Config');
         $basePath = $config['file_store']['local']['base_path'] ?: (OMEKA_PATH . '/files');
 
-        if (!$this->checkDestinationDir($basePath . '/bulk_export')) {
+        if (!$this->checkDestinationDir($basePath . '/bulk_export', true)) {
             $errors[] = (string) (new PsrMessage(
                 'The directory "{path}" is not writeable.', // @translate
                 ['path' => $basePath . '/bulk_export']
@@ -205,7 +222,7 @@ class Module extends AbstractModule
             ->allow(
                 $backendRoles,
                 ['BulkExport\Controller\Admin\Export'],
-                ['browse', 'index', 'show', 'logs', 'delete-confirm', 'delete']
+                ['browse', 'index', 'show', 'logs', 'download', 'delete-confirm', 'delete']
             )
             ->allow(
                 $backendRoles,
@@ -364,7 +381,15 @@ class Module extends AbstractModule
                     'required' => false,
                 ])
                 ->add([
+                    'name' => 'bulkexport_metadata_size',
+                    'required' => false,
+                ])
+                ->add([
                     'name' => 'bulkexport_metadata_exclude',
+                    'required' => false,
+                ])
+                ->add([
+                    'name' => 'bulkexport_metadata_exclude_size',
                     'required' => false,
                 ])
                 ->add([
@@ -389,7 +414,15 @@ class Module extends AbstractModule
                 'required' => false,
             ])
             ->add([
+                'name' => 'bulkexport_metadata_size',
+                'required' => false,
+            ])
+            ->add([
                 'name' => 'bulkexport_metadata_exclude',
+                'required' => false,
+            ])
+            ->add([
+                'name' => 'bulkexport_metadata_exclude_size',
                 'required' => false,
             ])
             ->add([
@@ -407,14 +440,9 @@ class Module extends AbstractModule
         $services = $this->getServiceLocator();
         $siteSettings = $services->get('Omeka\Settings\Site');
 
-        $allowed = [
-            'item_show' => 'items',
-            'itemset_show' => 'item_sets',
-            'media_show' => 'media',
-        ];
-        $bulkExportViews = $siteSettings->get('bulkexport_views') ?: [];
-        $bulkExportViews = array_intersect_key($allowed, array_fill_keys($bulkExportViews, null));
-        if (!count($bulkExportViews)) {
+        // Placements use the format "position/resource" (old themes only).
+        $placements = $siteSettings->get('bulkexport_placement', []);
+        if (!count($placements)) {
             return;
         }
 
@@ -422,8 +450,7 @@ class Module extends AbstractModule
         $vars = $view->vars();
 
         $resource = $vars->offsetGet('resource');
-        $resourceName = $resource->resourceName();
-        if (!in_array($resourceName, $bulkExportViews)) {
+        if (!in_array('after/' . $resource->resourceName(), $placements)) {
             return;
         }
 
@@ -453,14 +480,9 @@ class Module extends AbstractModule
         $services = $this->getServiceLocator();
         $siteSettings = $services->get('Omeka\Settings\Site');
 
-        $allowed = [
-            'item_browse' => 'items',
-            'itemset_browse' => 'item_sets',
-            'media_browse' => 'media',
-        ];
-        $bulkExportViews = $siteSettings->get('bulkexport_views') ?: [];
-        $bulkExportViews = array_intersect_key($allowed, array_fill_keys($bulkExportViews, null));
-        if (!count($bulkExportViews)) {
+        // Placements use the format "position/resource" (old themes only).
+        $placements = $siteSettings->get('bulkexport_placement', []);
+        if (!count($placements)) {
             return;
         }
 
@@ -471,7 +493,7 @@ class Module extends AbstractModule
         $paramsRoute = $params->fromRoute();
         $controller = $paramsRoute['__CONTROLLER'] ?? $paramsRoute['controller'] ?? null;
         $resourceName = $easyMeta->resourceName($controller);
-        if (!in_array($resourceName, $bulkExportViews)) {
+        if (!in_array('browse/' . $resourceName, $placements)) {
             return;
         }
 

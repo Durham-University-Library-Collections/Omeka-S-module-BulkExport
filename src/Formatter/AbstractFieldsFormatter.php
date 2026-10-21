@@ -25,6 +25,12 @@ abstract class AbstractFieldsFormatter extends AbstractFormatter
         'format_uri' => 'uri_label',
         'only_first' => false,
         'empty_fields' => false,
+        // Optional Mapper mapping name applied to each value as a post-format
+        // step. Each field is matched against a map whose from.path equals the
+        // field name; the value is passed through serializeValue. Requires
+        // module Mapper. Without this option the formatter keeps its legacy
+        // behavior unchanged.
+        'mapper' => null,
     ];
 
     /**
@@ -39,10 +45,34 @@ abstract class AbstractFieldsFormatter extends AbstractFormatter
         return parent::format($resources, $output, $options + $this->defaultOptionsFields);
     }
 
+    protected function reset(): self
+    {
+        parent::reset();
+        // The formatter is a shared service, so clear the fields prepared for a
+        // previous export, else they are reused as is.
+        $this->fieldNames = null;
+        $this->fieldLabels = null;
+        $this->labelFormatFields = 'name';
+        $this->fieldColumnsInfo = [];
+        $this->expandedFieldNames = [];
+        $this->expandedFieldsMap = [];
+        return $this;
+    }
+
     protected function process(): self
     {
+        $metadata = (array) ($this->options['metadata'] ?? []);
+        $metadataSize = (string) ($this->options['metadata_size'] ?? '');
+        if ($metadataSize !== '') {
+            $metadata[] = $metadataSize;
+        }
+        $metadataExclude = (array) ($this->options['metadata_exclude'] ?? []);
+        $metadataExcludeSize = (string) ($this->options['metadata_exclude_size'] ?? '');
+        if ($metadataExcludeSize !== '') {
+            $metadataExclude[] = $metadataExcludeSize;
+        }
         $this
-            ->prepareFieldNames($this->options['metadata'], $this->options['metadata_exclude']);
+            ->prepareFieldNames($metadata, $metadataExclude);
 
         if (!count($this->fieldNames)) {
             $this->logger->warn('No metadata are used in any resources.'); // @translate
@@ -116,6 +146,7 @@ abstract class AbstractFieldsFormatter extends AbstractFormatter
             $shaperParams = $this->shaperSettings($shaper);
             $values = $this->stringMetadata($resource, $fieldName, $shaperParams);
             $values = $this->shapeValues($values, $shaperParams);
+            $values = $this->serializeViaMapper($fieldName, $values);
             if ($removeEmptyFields) {
                 $values = array_filter($values, 'strlen');
                 if (!count($values)) {
@@ -131,6 +162,35 @@ abstract class AbstractFieldsFormatter extends AbstractFormatter
             }
         }
         return $dataResource;
+    }
+
+    /**
+     * Apply Mapper::serializeValue() to each value when an export mapping is
+     * configured. The mapping's [maps] section is queried for an entry whose
+     * from.path equals the field name. Without an option or without the Mapper
+     * service the values are returned unchanged.
+     */
+    protected function serializeViaMapper(string $fieldName, array $values): array
+    {
+        $mappingName = $this->options['mapper'] ?? null;
+        if (!$mappingName || !$this->services->has('Mapper\Mapper')) {
+            return $values;
+        }
+
+        /** @var \Mapper\Stdlib\Mapper $mapper */
+        $mapper = $this->services->get('Mapper\Mapper');
+        $mapper->setMappingName($mappingName);
+
+        $map = $mapper->getMapperConfig()->getSectionSetting('maps', $fieldName);
+        if (!is_array($map)) {
+            return $values;
+        }
+
+        $result = [];
+        foreach ($values as $value) {
+            $result[] = $mapper->serializeValue($value, $map);
+        }
+        return $result;
     }
 
     /**
