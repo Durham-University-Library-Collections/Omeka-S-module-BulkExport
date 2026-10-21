@@ -498,13 +498,13 @@ $conf = [
                 'o:resource_class',
                 'o:owner',
                 'o:is_public',
-                'properties_max_5000',
             ],
+            'bulkexport_metadata_size' => 'properties_max_5000',
             'bulkexport_metadata_exclude' => [
-                'properties_min_5000',
                 'bibo:content',
                 'extracttext:extracted_text',
             ],
+            'bulkexport_metadata_exclude_size' => 'properties_min_5000',
             'bulkexport_metadata_shapers' => [],
             'bulkexport_format_fields' => 'name',
             'bulkexport_format_fields_labels' => [],
@@ -519,15 +519,10 @@ $conf = [
             'bulkexport_column_metadata' => [],
         ],
         'site_settings' => [
+            // Triggered partials are deprecated with new themes. Placements use
+            // the format "position/resource" (after/items, browse/items…).
+            'bulkexport_placement' => [],
             'bulkexport_limit' => 1000,
-            'bulkexport_views' => [
-                // 'item_show',
-                'item_browse',
-                // 'itemset_show',
-                // 'itemset_browse',
-                // 'media_show',
-                // 'media_browse',
-            ],
             'bulkexport_formatters' => [
                 'csv',
                 // 'json',
@@ -543,14 +538,14 @@ $conf = [
                 'id',
                 'url',
                 'o:resource_class',
-                'properties_max_500',
             ],
+            'bulkexport_metadata_size' => 'properties_max_500',
             'bulkexport_metadata_exclude' => [
                 'o:owner',
-                'properties_min_500',
                 'bibo:content',
                 'extracttext:extracted_text',
             ],
+            'bulkexport_metadata_exclude_size' => 'properties_min_500',
             'bulkexport_metadata_shapers' => [],
             'bulkexport_format_fields' => 'label',
             'bulkexport_format_fields_labels' => [],

@@ -10,6 +10,13 @@ trait ListTermsTrait
     protected $propertyTemplateLabelsByTerm;
 
     /**
+     * Memoize used-properties lookups by option signature within the request.
+     *
+     * @var array
+     */
+    protected $usedPropertiesByTermCache = [];
+
+    /**
      * To be prepared ouside.
      *
      * @var \Laminas\Mvc\I18n\Translator
@@ -34,6 +41,11 @@ trait ListTermsTrait
             'min_size' => 0,
             'max_size' => 0,
         ];
+
+        $cacheKey = md5(serialize($options));
+        if (isset($this->usedPropertiesByTermCache[$cacheKey])) {
+            return $this->usedPropertiesByTermCache[$cacheKey];
+        }
 
         /** @var \Doctrine\DBAL\Connection $connection */
         $connection = $this->services->get('Omeka\Connection');
@@ -96,8 +108,8 @@ trait ListTermsTrait
             );
         }
 
-        $terms = $connection->executeQuery($qb, $bind, $types)->fetchAllKeyValue();
-        return array_map('intval', $terms);
+        $terms = $connection->executeQuery($qb->getSQL(), $bind, $types)->fetchAllKeyValue();
+        return $this->usedPropertiesByTermCache[$cacheKey] = array_map('intval', $terms);
     }
 
     /**
@@ -128,7 +140,7 @@ trait ListTermsTrait
             ->where('alternate_label != ""')
             ->addOrderBy('property.id', 'asc')
         ;
-        $this->propertyTemplateLabelsByTerm = $connection->executeQuery($qb)->fetchAllKeyValue();
+        $this->propertyTemplateLabelsByTerm = $connection->executeQuery($qb->getSQL())->fetchAllKeyValue();
         return $this->propertyTemplateLabelsByTerm;
     }
 

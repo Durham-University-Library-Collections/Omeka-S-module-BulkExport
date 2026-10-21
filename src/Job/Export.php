@@ -669,7 +669,7 @@ class Export extends AbstractJob
                 'sort_order' => 'DESC',
                 'limit' => 1,
             ])->getContent();
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $this->logger->err($e);
             return null;
         }
@@ -711,7 +711,19 @@ class Export extends AbstractJob
     {
         $outputPath = $this->getOutputFilepath();
         $destinationDir = dirname($outputPath);
-        return $this->checkDestinationDir($destinationDir) !== null;
+        if ($this->checkDestinationDir($destinationDir) === null) {
+            return false;
+        }
+
+        // Keep the default directory protected against direct web access, even
+        // when it is recreated by the job.
+        $config = $this->services->get('Config');
+        $defaultDir = ($config['file_store']['local']['base_path'] ?: (OMEKA_PATH . '/files')) . '/bulk_export';
+        if (mb_strpos($destinationDir . '/', $defaultDir . '/') === 0) {
+            $this->services->get('Common\DirectoryManager')->protectDirectory($defaultDir);
+        }
+
+        return true;
     }
 
     /**
@@ -890,7 +902,7 @@ class Export extends AbstractJob
                 $store = $this->services->get('Omeka\File\Store');
                 $store->put($this->filepath, $storagePath);
                 @unlink($this->filepath);
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
                 throw new \Omeka\Job\Exception\RuntimeException((string) new PsrMessage(
                     'Export error when saving "{filename}" (temp file: "{tempfile}"): {exception}', // @translate
                     ['filename' => $filename, 'tempfile' => $this->filepath, 'exception' => $e]
@@ -903,7 +915,7 @@ class Export extends AbstractJob
             try {
                 $result = copy($this->filepath, $outputFilepath);
                 @unlink($this->filepath);
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
                 throw new \Omeka\Job\Exception\RuntimeException((string) new PsrMessage(
                     'Export error when saving "{filename}" (temp file: "{tempfile}"): {exception}', // @translate
                     ['filename' => $filename, 'tempfile' => $this->filepath, 'exception' => $e]
@@ -922,9 +934,14 @@ class Export extends AbstractJob
         $data = ['o:filename' => $filename];
         $this->export = $this->api->update('bulk_exports', $this->export->id(), $data, [], ['isPartial' => true])->getContent();
 
-        $fileUrl = $this->export->fileUrl();
-        // For cloud storage, filesize may not be available after upload.
-        // Use the size from when we saved (stored in $filesize during save).
+        // Stream the export through the admin controller (the directory is
+        // protected by a .htaccess denying direct web access).
+        $fileUrl = $filename
+            ? $this->getServiceLocator()->get('ViewHelperManager')->get('url')
+                ->__invoke('admin/bulk-export/id', ['controller' => 'export', 'action' => 'download', 'id' => $this->export->id()])
+            : null;
+        // For cloud storage, filesize may not be available after upload. Use
+        // the size from when we saved (stored in $filesize during save).
         $filesize = $this->export->filesize() ?? $this->lastSavedFilesize ?? null;
         if (!$fileUrl) {
             $this->logger->notice(
@@ -1093,7 +1110,7 @@ class Export extends AbstractJob
 
         try {
             $mailer->send($message);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $this->logger->log(Logger::ERR, new \Omeka\Stdlib\Message(
                 'Error when sending email to notify end of process.' // @translate
             ));
@@ -1105,6 +1122,16 @@ class Export extends AbstractJob
     protected function zipFiles(array $formats, array $resourceTypes, array $query): self
     {
         if (!$formats || !$resourceTypes) {
+            return $this;
+        }
+
+        // The files are zipped with the extension zip, that is not required to
+        // install the module, so check it here to fail with a message instead
+        // of a fatal error.
+        if (!class_exists('ZipArchive')) {
+            $this->logger->err(
+                'The php extension "zip" is required to export the files.' // @translate
+            );
             return $this;
         }
 
@@ -1166,8 +1193,8 @@ class Export extends AbstractJob
         // Media may not have any file according to hasOriginal() or hasThumbnails().
 
         // Get the full list of files inside the specified directory.
-        $storageNames = $this->listStorageNamesForFormat($resourceType, $ids, $format);
-        $totalFiles = count($storageNames);
+        $storageFiles = $this->listStorageNamesForFormat($resourceType, $ids, $format);
+        $totalFiles = count($storageFiles);
 
         if (!$totalFiles) {
             $this->logger->warn(
@@ -1177,17 +1204,19 @@ class Export extends AbstractJob
             return 0;
         }
 
+        $naming = $this->options['zip_files_naming'] ?? 'storage';
+
         // Batch zip the resources in chunks.
         $filesZip = [];
         $index = 0;
         $indexFile = 1;
         $baseFilename = $this->basePath . '/temp/tmp/export_' . $format . '_' . $this->job->getId() . '_';
         $finalBaseFilename = $this->basePath . '/temp/export_' . $format . '_' . $this->job->getId() . '_';
-        $totalChunks = $totalFiles && $by ? (int) ceil(count($storageNames) / $by) : 0;
+        $totalChunks = $totalFiles && $by ? (int) ceil($totalFiles / $by) : 0;
 
         @mkdir(dirname($baseFilename), 0775, true);
 
-        foreach (array_chunk($storageNames, $by ?: 10000000, true) as $files) {
+        foreach (array_chunk($storageFiles, $by ?: 10000000) as $files) {
             if ($this->shouldStop()) {
                 $this->logger->warn(
                     'Zipping "{format}" files stopped.', // @translate
@@ -1215,12 +1244,12 @@ class Export extends AbstractJob
             // The path is already relative.
             // The format is prepended now and the extension is the right one.
             foreach ($files as $file) {
-                $relativePath = ltrim((string) $file, '/');
+                $relativePath = ltrim((string) $file['file'], '/');
                 $fullPath = $this->basePath . '/' . $relativePath;
                 if (!file_exists($fullPath) || !is_readable($fullPath)) {
                     continue;
                 }
-                $zip->addFile($fullPath, $relativePath);
+                $zip->addFile($fullPath, $this->zipEntryName($file, $naming));
                 ++$indexFile;
             }
 
@@ -1243,11 +1272,38 @@ class Export extends AbstractJob
     }
 
     /**
+     * Get the name of a file inside the zip.
+     *
+     * - storage: the stored path, like "original/{storage_id}.{extension}";
+     * - item_folder: "original/{item id}/{media id}.{extension}";
+     * - item_prefix: "original/{item id}_{media id}.{extension}".
+     *
+     * The asset attached to an item is named "asset".
+     */
+    protected function zipEntryName(array $file, string $naming): string
+    {
+        $path = ltrim((string) $file['file'], '/');
+        if (empty($file['item_id']) || !in_array($naming, ['item_folder', 'item_prefix'], true)) {
+            return $path;
+        }
+        $dir = strtok($path, '/');
+        $name = empty($file['media_id']) ? 'asset' : (string) $file['media_id'];
+        $extension = pathinfo($path, PATHINFO_EXTENSION);
+        $extension = strlen($extension) ? '.' . $extension : '';
+        return $naming === 'item_folder'
+            ? $dir . '/' . $file['item_id'] . '/' . $name . $extension
+            : $dir . '/' . $file['item_id'] . '_' . $name . $extension;
+    }
+
+    /**
      * Get the list of files for the specified format.
      *
      * Format are "original", "large", "medium", "square" and "asset".
      * Special formats are "asset_original", "asset_large", etc. When used, the
      * asset is stored if any, else the thumbnail in the specified format.
+     *
+     * @return array[] List of files with keys "file" (relative path), "item_id"
+     *   and "media_id" (null for the asset of an item).
      */
     protected function listStorageNamesForFormat($resourceType, array $ids, string $format): array
     {
@@ -1255,8 +1311,9 @@ class Export extends AbstractJob
         if (in_array($format, ['original', 'large', 'medium', 'square'])) {
             $sql = <<<'SQL'
                 SELECT
-                    `id`,
-                    CONCAT(:prefix, '/', `storage_id`, '.', `extension`) AS "file"
+                    `id` AS "media_id",
+                    `item_id`,
+                    CONCAT(:prefix, '/', `storage_id`, '.', __EXTENSION__) AS "file"
                 FROM `media`
                 WHERE `__HAS__` = 1
                   AND `storage_id` IS NOT NULL
@@ -1269,21 +1326,25 @@ class Export extends AbstractJob
             $sql = strtr($sql, [
                 '__HAS__' => $format === 'original' ? 'has_original' : 'has_thumbnails',
                 '__TYPE__' => $resourceType === 'items' ? 'item_id' : 'id',
+                // The thumbnails are always stored as jpeg.
+                '__EXTENSION__' => $format === 'original' ? '`extension`' : "'jpg'",
             ]);
             return $this->connection->executeQuery(
                 $sql,
                 ['prefix' => $prefix, 'ids' => $ids],
                 ['ids' => Connection::PARAM_INT_ARRAY]
-            )->fetchAllKeyValue();
+            )->fetchAllAssociative();
         }
 
         if ($format === 'asset') {
             $sql = <<<'SQL'
                 SELECT
-                    `resource`.`id`,
+                    `media`.`id` AS "media_id",
+                    COALESCE(`media`.`item_id`, `resource`.`id`) AS "item_id",
                     CONCAT(:prefix, '/', `asset`.`storage_id`, '.', `asset`.`extension`) AS "file"
                 FROM `asset`
                 INNER JOIN `resource` ON `resource`.`thumbnail_id` = `asset`.`id`
+                LEFT JOIN `media` ON `media`.`id` = `resource`.`id`
                 WHERE `resource`.`id` IN (:ids)
                 ORDER BY `asset`.`storage_id` ASC;
                 SQL;
@@ -1291,26 +1352,32 @@ class Export extends AbstractJob
                 $sql,
                 ['prefix' => $prefix, 'ids' => $ids],
                 ['ids' => Connection::PARAM_INT_ARRAY]
-            )->fetchAllKeyValue();
+            )->fetchAllAssociative();
         }
 
         // Complex output for special formats like "asset_original", etc.
         // Prepend the main type: "asset" when asset exists, else fallback
-        // original or derivative.
+        // original or derivative. One file is kept by resource.
         $fallback = substr($format, 6);
-        $prefix = 'asset';
 
         $sql = <<<'SQL'
             (
-                SELECT `resource`.`id`, CONCAT('asset', '/', `asset`.`storage_id`, '.', `asset`.`extension`) AS "file"
+                SELECT
+                    `resource`.`id`,
+                    `media`.`id` AS "media_id",
+                    COALESCE(`media`.`item_id`, `resource`.`id`) AS "item_id",
+                    CONCAT('asset', '/', `asset`.`storage_id`, '.', `asset`.`extension`) AS "file"
                 FROM `resource` resource
                 INNER JOIN `asset` asset ON resource.`thumbnail_id` = asset.`id`
+                LEFT JOIN `media` media ON media.`id` = resource.`id`
                 WHERE resource.`id` IN (:ids)
             )
             UNION ALL
             (
                 SELECT
                     `media`.`__TYPE_ID__` AS `id`,
+                    `media`.`id` AS "media_id",
+                    `media`.`item_id`,
                     CONCAT(
                         :fallback,
                         '/',
@@ -1339,10 +1406,15 @@ class Export extends AbstractJob
             '__TYPE__' => $resourceType === 'items' ? 'item_id' : 'id',
             '__TYPE_ID__' => $resourceType === 'items' ? 'item_id' : 'id',
         ]);
-        return $this->connection->executeQuery(
+        $rows = $this->connection->executeQuery(
             $sql,
             ['ids' => $ids, 'fallback' => $fallback],
             ['ids' => Connection::PARAM_INT_ARRAY]
-        )->fetchAllKeyValue();
+        )->fetchAllAssociative();
+        $files = [];
+        foreach ($rows as $row) {
+            $files[$row['id']] = $row;
+        }
+        return array_values($files);
     }
 }

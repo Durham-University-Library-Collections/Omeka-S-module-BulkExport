@@ -364,10 +364,6 @@ trait ResourceFieldsTrait
 
         $entityClasses = array_map([$this, 'mapResourceTypeToEntity'], $this->options['resource_types'] ?? []);
         $resourceIds = $this->resourceIds ?? [];
-        $unlimitedUsedProperties = array_keys($this->getUsedPropertiesByTerm([
-            'entity_classes' => $entityClasses,
-            'resource_ids' => $resourceIds,
-        ]));
         $this->options['resource_types'] = $this->options['resource_types'] ?: [];
 
         if ($listFieldNames) {
@@ -402,6 +398,9 @@ trait ResourceFieldsTrait
                         $this->fieldNames[] = 'o:is_open';
                         break;
                     case 'o:Item':
+                        if (class_exists('PersistentIdentifiers\Module', false)) {
+                            $this->fieldNames[] = 'o:pid';
+                        }
                         $this->fieldNames[] = 'o:item_set/o:id';
                         $this->fieldNames[] = 'o:item_set/dcterms:title';
                         $this->fieldNames[] = 'o:media/o:id';
@@ -453,15 +452,25 @@ trait ResourceFieldsTrait
         if ($listFieldsToExclude) {
             $toExclude = $this->managePropertiesList($listFieldsToExclude);
             $this->fieldNames = array_diff($this->fieldNames, $toExclude);
-            $unlimitedUsedProperties = array_diff($unlimitedUsedProperties, $toExclude);
         }
 
-        $missingProperties = array_diff($unlimitedUsedProperties, $usedProperties);
-        if ($hasPropertiesMinMax && count($missingProperties)) {
-            $this->logger->warn(
-                'Some properties are not exported because they contain more or less than 500, 1000 or 5000 characters: {properties}.', // @translate
-                ['properties' => $missingProperties]
-            );
+        // The unlimited property list is only used to warn about properties
+        // skipped for their size, so run it (a value-table scan) only then.
+        if ($hasPropertiesMinMax) {
+            $unlimitedUsedProperties = array_keys($this->getUsedPropertiesByTerm([
+                'entity_classes' => $entityClasses,
+                'resource_ids' => $resourceIds,
+            ]));
+            if ($listFieldsToExclude) {
+                $unlimitedUsedProperties = array_diff($unlimitedUsedProperties, $toExclude);
+            }
+            $missingProperties = array_diff($unlimitedUsedProperties, $usedProperties);
+            if (count($missingProperties)) {
+                $this->logger->warn(
+                    'Some properties are not exported because they contain more or less than 500, 1000 or 5000 characters: {properties}.', // @translate
+                    ['properties' => $missingProperties]
+                );
+            }
         }
 
         // Parse metadata_shapers for multiple shapers per field support.
@@ -624,10 +633,15 @@ trait ResourceFieldsTrait
                 '(o:asset/o:filename | o:primary_media/o:filename/medium)[1]' => $this->translator->translate('Asset file name if any, else primary media medium file name'), // @translate
                 '(o:asset/o:filename | o:primary_media/o:filename/square)[1]' => $this->translator->translate('Asset file name if any, else primary media square file name'), // @translate
                 'o:annotation' => $this->translator->translate('Annotation'), // @translate
+                '@reverse' => $this->translator->translate('Linked resource'), // @translate
+                '@reverse/o:id' => $this->translator->translate('Linked resource id'), // @translate
+                '@reverse/dcterms:identifier' => $this->translator->translate('Linked resource identifier'), // @translate
+                '@reverse/dcterms:title' => $this->translator->translate('Linked resource title'), // @translate
                 'url' => $this->translator->translate('Url'), // @translate,
                 'resource_type' => $this->translator->translate('Resource type'), // @translate,
                 // Modules.
                 'o-module-folksonomy:tag' => $this->translator->translate('Tag'), // @translate
+                'o:pid' => $this->translator->translate('Persistent identifier'), // @translate
             ];
         }
 
@@ -681,6 +695,9 @@ trait ResourceFieldsTrait
             'o:Item' => \Omeka\Entity\Item::class,
             'o:Media' => \Omeka\Entity\Media::class,
             'o:ItemSet' => \Omeka\Entity\ItemSet::class,
+            'o:DigitalObject' => class_exists('DigitalObject\Module', false)
+                ? \DigitalObject\Entity\DigitalObject::class
+                : null,
             'o:Module' => \Omeka\Entity\Module::class,
             'o:Site' => \Omeka\Entity\Site::class,
             'o:SitePage' => \Omeka\Entity\SitePage::class,
@@ -705,6 +722,7 @@ trait ResourceFieldsTrait
             'o:owner',
             'o:is_public',
             'o:is_open',
+            'o:pid',
             /*
             'o:resource',
             'o:resource/o:id',

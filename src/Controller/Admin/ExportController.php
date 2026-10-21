@@ -102,7 +102,7 @@ class ExportController extends AbstractActionController
         /** @var \BulkExport\Api\Representation\ExportRepresentation $export */
         try {
             $export = $this->api()->read('bulk_exports', ['id' => $id])->getContent();
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $export = null;
         }
         if (!$export) {
@@ -151,5 +151,34 @@ class ExportController extends AbstractActionController
             'logs' => $logs,
             'severity' => $severity,
         ]);
+    }
+
+    /**
+     * Download an export file, confined to the protected directory.
+     *
+     * The api read enforces the access rights of the export (the owner or a
+     * user allowed to view all resources), so the file is not reachable through
+     * a public url.
+     */
+    public function downloadAction()
+    {
+        $id = $this->params()->fromRoute('id');
+        $export = $this->api()->read('bulk_exports', ['id' => $id])->getContent();
+
+        $filepath = $export->filename(true);
+        if (!$filepath) {
+            throw new \Omeka\Mvc\Exception\NotFoundException();
+        }
+
+        $services = $this->getEvent()->getApplication()->getServiceManager();
+        $config = $services->get('Config');
+        $basePath = $config['file_store']['local']['base_path'] ?: (OMEKA_PATH . '/files');
+
+        $response = $this->sendFilePrivate($filepath, $basePath . '/bulk_export');
+        if (!$response) {
+            throw new \Omeka\Mvc\Exception\NotFoundException();
+        }
+
+        return $response;
     }
 }

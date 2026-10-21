@@ -136,32 +136,32 @@ trait MetadataToStringTrait
                     ? $this->extractFirstValueOfResources($resource->media(), $metadata)
                     : [];
             case 'o:media/o:media_type':
-                return $resource->resourceName() === 'media'
+                return in_array($resource->resourceName(), ['media', 'digital_objects'], true)
                     ? [$resource->mediaType()]
                     : [];
             case 'o:media/o:size':
-                return $resource->resourceName() === 'media'
+                return in_array($resource->resourceName(), ['media', 'digital_objects'], true)
                     ? [$resource->size()]
                     : [];
             case 'o:media/o:original_url':
             case 'o:media/original_url':
-                return $resource->resourceName() === 'media' && $resource->hasOriginal()
+                return in_array($resource->resourceName(), ['media', 'digital_objects'], true) && $resource->hasOriginal()
                     ? [$resource->originalUrl()]
                     : [];
             case 'o:media/o:thumbnails_url/large':
             case 'o:media/o:thumbnails_url/medium':
             case 'o:media/o:thumbnails_url/square':
-                return $resource->resourceName() === 'media' && $resource->hasThumbnails()
+                return in_array($resource->resourceName(), ['media', 'digital_objects'], true) && $resource->hasThumbnails()
                     ? [$resource->thumbnailUrl(substr($metadata, strrpos($metadata, '/') + 1))]
                     : [];
             case 'o:media/o:filename':
-                return $resource->resourceName() === 'media' && $resource->hasOriginal()
+                return in_array($resource->resourceName(), ['media', 'digital_objects'], true) && $resource->hasOriginal()
                     ? [$resource->filename()]
                     : [];
             case 'o:media/o:filename/large':
             case 'o:media/o:filename/medium':
             case 'o:media/o:filename/square':
-                return $resource->resourceName() === 'media' && $resource->hasThumbnails()
+                return in_array($resource->resourceName(), ['media', 'digital_objects'], true) && $resource->hasThumbnails()
                     ? [substr($resource->filename(), 0, strrpos($resource->filename(), '.')) . '.jpg']
                     : [];
 
@@ -243,6 +243,20 @@ trait MetadataToStringTrait
                     ? $this->extractFirstValueOfResources([$resource->item()], $metadata)
                     : [];
 
+            // Resources linking to this one (JSON-LD @reverse).
+            case '@reverse/o:id':
+                return $this->subjectResourceIds($resource);
+            case '@reverse/dcterms:identifier':
+            case '@reverse/dcterms:title':
+                $resources = [];
+                foreach ($this->subjectResourceIds($resource) as $id) {
+                    try {
+                        $resources[] = $this->api->read('resources', $id)->getContent();
+                    } catch (\Exception $e) {
+                    }
+                }
+                return $this->extractFirstValueOfResources($resources, $metadata);
+
             // Resources for annotation (target).
             case 'o:resource/o:id':
                 /** @var \Annotate\Api\Representation\AnnotationRepresentation $resource*/
@@ -274,16 +288,13 @@ trait MetadataToStringTrait
 
             // Module HistoryLog.
             case 'operation':
-                if (!$this->hasHistoryLog) {
-                    return [];
-                }
-                $lastOperation = $this->historyLastOperations[$resource->resourceName()][$resource->id()] ?? null;
-                if ($lastOperation === 'import') {
-                    $lastOperation = 'create';
-                } elseif ($lastOperation === 'export') {
-                    $lastOperation = 'update';
-                }
-                return $lastOperation ? [$lastOperation] : [];
+                return $this->lastOperation($resource);
+
+            // Module Persistent Identifiers.
+            case 'o:pid':
+                return $resource->resourceName() === 'items'
+                    ? $this->persistentIdentifier($resource->id())
+                    : [];
 
             // Module Folksonomy.
             case 'o-module-folksonomy:tag':
@@ -440,16 +451,82 @@ trait MetadataToStringTrait
     }
 
     /**
+     * Get the persistent identifier of an item (module Persistent Identifiers).
+     *
+     * The table is read directly: an item has one pid at most, and the module
+     * does not add it to the item representation.
+     */
+    protected function persistentIdentifier(int $itemId): array
+    {
+        if (!class_exists('PersistentIdentifiers\Module', false)) {
+            return [];
+        }
+        $pid = $this->services->get('Omeka\Connection')
+            ->fetchOne('SELECT `pid` FROM `pid_item` WHERE `item_id` = ?', [$itemId]);
+        return is_string($pid) && $pid !== '' ? [$pid] : [];
+    }
+
+    /**
+     * Get the last operation on the resource logged by module History Log.
+     *
+     * Operations "import" and "export" are converted into "create" and
+     * "update".
+     */
+    protected function lastOperation(AbstractResourceRepresentation $resource): array
+    {
+        if (!class_exists('HistoryLog\Module', false)) {
+            return [];
+        }
+        $operations = $this->api->search('history_events', [
+            'entity_name' => $resource->resourceName(),
+            'entity_id' => $resource->id(),
+            'sort_by' => 'id',
+            'sort_order' => 'desc',
+            'limit' => 1,
+        ], ['returnScalar' => 'operation'])->getContent();
+        $operation = reset($operations);
+        if (!$operation) {
+            return [];
+        }
+        return [['import' => 'create', 'export' => 'update'][$operation] ?? $operation];
+    }
+
+    /**
+     * Get the ids of the resources that link to the resource, without
+     * duplicates.
+     *
+     * Visibility is managed by the doctrine filter of the current user.
+     */
+    protected function subjectResourceIds(AbstractResourceRepresentation $resource): array
+    {
+        if (!$resource instanceof AbstractResourceEntityRepresentation) {
+            return [];
+        }
+        $entity = $this->services->get('Omeka\EntityManager')
+            ->find(\Omeka\Entity\Resource::class, $resource->id());
+        if (!$entity) {
+            return [];
+        }
+        $rows = $this->services->get('Omeka\ApiAdapterManager')
+            ->get($resource->resourceName())
+            ->getSubjectValuesSimple($entity);
+        return array_values(array_unique(array_map('intval', array_column($rows, 'id'))));
+    }
+
+    /**
      * Return the first value of the property of all resources.
      *
      * @param \Omeka\Api\Representation\AbstractResourceEntityRepresentation[] $resources
-     * @param string $metadata The full metadata, with a term.
+     * @param string $metadata The full metadata, with a term, like
+     *   "o:item_set/dcterms:title" or "o:resource[dcterms:title]".
      * @return array
      */
     protected function extractFirstValueOfResources(array $resources, $metadata): array
     {
         $result = [];
-        $term = trim(substr($metadata, strpos($metadata, '[') + 1), '[] ');
+        $term = strpos($metadata, '[') === false
+            ? substr($metadata, strrpos($metadata, '/') + 1)
+            : trim(substr($metadata, strpos($metadata, '[') + 1), '[] ');
         foreach ($resources as $resource) {
             $value = $resource->value($term);
             if ($value) {
