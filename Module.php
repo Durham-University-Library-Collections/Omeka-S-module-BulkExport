@@ -61,10 +61,10 @@ class Module extends AbstractModule
         $services = $this->getServiceLocator();
         $translator = $services->get('MvcTranslator');
 
-        if (!method_exists($this, 'checkModuleActiveVersion') || !$this->checkModuleActiveVersion('Common', '3.4.93')) {
+        if (!method_exists($this, 'checkModuleActiveVersion') || !$this->checkModuleActiveVersion('Common', '3.4.95')) {
             $message = new \Omeka\Stdlib\Message(
                 $translator->translate('The module %1$s should be upgraded to version %2$s or later.'), // @translate
-                'Common', '3.4.93'
+                'Common', '3.4.95'
             );
             throw new \Omeka\Module\Exception\ModuleCannotInstallException((string) $message);
         }
@@ -78,10 +78,10 @@ class Module extends AbstractModule
             ))->setTranslator($translator);
         }
 
-        if (!$this->checkModuleActiveVersion('Log', '3.4.40')) {
+        if (!$this->checkModuleActiveVersion('Log', '3.4.42')) {
             $errors[] = (string) (new PsrMessage(
                 'The module {module} should be upgraded to version {version} or later.', // @translate
-                ['module' => 'Log', 'version' => '3.4.40']
+                ['module' => 'Log', 'version' => '3.4.42']
             ))->setTranslator($translator);
         }
 
@@ -187,7 +187,7 @@ class Module extends AbstractModule
         $acl = $services->get('Omeka\Acl');
 
         $roles = $acl->getRoles();
-        $backendRoles = array_diff($roles, ['guest']);
+        $backendRoles = array_diff($roles, ['guest', 'guest_private', 'guest_private_site']);
         $baseRoles = array_diff($backendRoles, ['editor', 'site_admin', 'global_admin']);
 
         $acl

@@ -30,10 +30,10 @@ $localConfig = include dirname(__DIR__, 2) . '/config/module.config.php';
 
 $failExporters = [];
 
-if (!method_exists($this, 'checkModuleActiveVersion') || !$this->checkModuleActiveVersion('Common', '3.4.93')) {
+if (!method_exists($this, 'checkModuleActiveVersion') || !$this->checkModuleActiveVersion('Common', '3.4.95')) {
     $message = new \Omeka\Stdlib\Message(
         $translate('The module %1$s should be upgraded to version %2$s or later.'), // @translate
-        'Common', '3.4.93'
+        'Common', '3.4.95'
     );
     $messenger->addError($message);
     throw new \Omeka\Module\Exception\ModuleCannotInstallException((string) $translate('Missing requirement. Unable to upgrade.')); // @translate
@@ -50,10 +50,10 @@ if (PHP_VERSION_ID < 80100) {
     $hasError = true;
 }
 
-if (!$this->checkModuleActiveVersion('Log', '3.4.40')) {
+if (!$this->checkModuleActiveVersion('Log', '3.4.42')) {
     $message = new PsrMessage(
         'The module {module} should be upgraded to version {version} or later.', // @translate
-        ['module' => 'Log', 'version' => '3.4.40']
+        ['module' => 'Log', 'version' => '3.4.42']
     );
     $messenger->addError($message);
     $hasError = true;
@@ -748,6 +748,30 @@ if (version_compare($oldVersion, '3.4.41', '<')) {
         $messenger->addWarning(new PsrMessage(
             'The directory "{path}" is not writeable.', // @translate
             ['path' => $basePath . '/bulk_export']
+        ));
+    }
+}
+
+if (version_compare($oldVersion, '3.4.42', '<')) {
+    // Use the standard csv format (rfc 4180), without escape character.
+    $updated = 0;
+    $rows = $connection->fetchAllAssociative('SELECT id, config FROM bulk_exporter');
+    foreach ($rows as $row) {
+        $config = json_decode((string) $row['config'], true) ?: [];
+        if (!isset($config['formatter']['escape']) || $config['formatter']['escape'] === '') {
+            continue;
+        }
+        $config['formatter']['escape'] = '';
+        $connection->executeStatement(
+            'UPDATE bulk_exporter SET config = :c WHERE id = :id',
+            ['c' => json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), 'id' => $row['id']]
+        );
+        ++$updated;
+    }
+    if ($updated) {
+        $messenger->addSuccess(new PsrMessage(
+            'The escape character of {count} exporter(s) was removed to follow the standard csv format.', // @translate
+            ['count' => $updated]
         ));
     }
 }
